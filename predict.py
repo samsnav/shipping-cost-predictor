@@ -25,43 +25,33 @@ _cache: dict = {}
 
 
 def _load(model_type: str = 'nn'):
-    cache_key = f'loaded_{model_type}'
-    if cache_key in _cache:
-        return _cache
+    if 'lookups' not in _cache:
+        lookups, encoders, scaler, model_config = load_artifacts()
+        _cache.update({'lookups': lookups, 'encoders': encoders,
+                       'scaler': scaler, 'model_config': model_config})
 
-    lookups, encoders, scaler, model_config = load_artifacts()
+    need_nn   = model_type in ('nn', 'ensemble')
+    need_lgbm = model_type in ('lgbm', 'ensemble')
 
-    def _load_nn():
+    if need_nn and 'model_nn' not in _cache:
+        cfg = _cache['model_config']
         m = ShippingCostNN(
-            embedding_sizes=model_config['embedding_sizes'],
-            n_numeric=model_config['n_numeric'],
-            hidden_sizes=model_config.get('hidden_sizes', (256, 128, 64)),
-            dropout=model_config.get('dropout', 0.3),
+            embedding_sizes=cfg['embedding_sizes'],
+            n_numeric=cfg['n_numeric'],
+            hidden_sizes=cfg.get('hidden_sizes', (256, 128, 64)),
+            dropout=cfg.get('dropout', 0.3),
         )
         m.load_state_dict(
             torch.load(os.path.join(ARTIFACTS_DIR, 'best_model.pt'), map_location=DEVICE)
         )
         m.eval()
-        return m
+        _cache['model_nn'] = m
 
-    def _load_lgbm():
-        return lgb.Booster(model_file=os.path.join(ARTIFACTS_DIR, 'lgbm_model.txt'))
+    if need_lgbm and 'model_lgbm' not in _cache:
+        _cache['model_lgbm'] = lgb.Booster(
+            model_file=os.path.join(ARTIFACTS_DIR, 'lgbm_model.txt')
+        )
 
-    if model_type == 'lgbm':
-        model = _load_lgbm()
-    elif model_type == 'ensemble':
-        model = {'nn': _load_nn(), 'lgbm': _load_lgbm()}
-    else:
-        model = _load_nn()
-
-    _cache.update({
-        'lookups': lookups,
-        'encoders': encoders,
-        'scaler': scaler,
-        'model': model,
-        'model_type': model_type,
-        cache_key: True,
-    })
     return _cache
 
 
@@ -99,11 +89,10 @@ def predict_cost(
     -------
     float : predicted cost in dollars
     """
-    arts = _load(model_type)
+    arts     = _load(model_type)
     lookups  = arts['lookups']
     encoders = arts['encoders']
     scaler   = arts['scaler']
-    model    = arts['model']
 
     item_lookup   = lookups['item_lookup']
     location_zip3 = lookups['location_zip3']
@@ -185,11 +174,11 @@ def predict_cost(
         return float(m.predict(X_lgbm)[0])
 
     if model_type == 'ensemble':
-        log_pred = (_nn_log_pred(model['nn']) + _lgbm_log_pred(model['lgbm'])) / 2
+        log_pred = (_nn_log_pred(arts['model_nn']) + _lgbm_log_pred(arts['model_lgbm'])) / 2
     elif model_type == 'lgbm':
-        log_pred = _lgbm_log_pred(model)
+        log_pred = _lgbm_log_pred(arts['model_lgbm'])
     else:
-        log_pred = _nn_log_pred(model)
+        log_pred = _nn_log_pred(arts['model_nn'])
 
     return float(np.expm1(log_pred))
 

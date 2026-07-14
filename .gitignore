@@ -1,0 +1,18 @@
+# Raw data — keep locally, do not commit
+*.xlsx
+*.xls
+*.csv
+
+# Trained model artifacts — reproduced by running train.py
+artifacts/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+
+# OS
+.DS_Store
+Thumbs.db

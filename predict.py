@@ -31,20 +31,28 @@ def _load(model_type: str = 'nn'):
 
     lookups, encoders, scaler, model_config = load_artifacts()
 
-    if model_type == 'lgbm':
-        model_path = os.path.join(ARTIFACTS_DIR, 'lgbm_model.txt')
-        model = lgb.Booster(model_file=model_path)
-    else:
-        model = ShippingCostNN(
+    def _load_nn():
+        m = ShippingCostNN(
             embedding_sizes=model_config['embedding_sizes'],
             n_numeric=model_config['n_numeric'],
             hidden_sizes=model_config.get('hidden_sizes', (256, 128, 64)),
             dropout=model_config.get('dropout', 0.3),
         )
-        model.load_state_dict(
+        m.load_state_dict(
             torch.load(os.path.join(ARTIFACTS_DIR, 'best_model.pt'), map_location=DEVICE)
         )
-        model.eval()
+        m.eval()
+        return m
+
+    def _load_lgbm():
+        return lgb.Booster(model_file=os.path.join(ARTIFACTS_DIR, 'lgbm_model.txt'))
+
+    if model_type == 'lgbm':
+        model = _load_lgbm()
+    elif model_type == 'ensemble':
+        model = {'nn': _load_nn(), 'lgbm': _load_lgbm()}
+    else:
+        model = _load_nn()
 
     _cache.update({
         'lookups': lookups,
@@ -85,6 +93,7 @@ def predict_cost(
     qty                     : number of units
     carrier_mode            : e.g. 'PARCEL', 'LTL', 'VOLUME'  (default: 'PARCEL')
     carrier_name            : e.g. 'UPS', 'FEDEX', 'ESTES'    (default: 'UPS')
+    model_type              : 'nn', 'lgbm', or 'ensemble'      (default: 'nn')
 
     Returns
     -------
@@ -161,19 +170,26 @@ def predict_cost(
     )
 
     # ── Forward pass ─────────────────────────────────────────────────────────
-    if model_type == 'lgbm':
-        x_num = np.array([[num_vals[col] for col in NUM_COLS]], dtype=np.float32)
-        X = np.hstack([x_cat, x_num])
-        log_pred = float(model.predict(X)[0])
-    else:
-        x_num = scaler.transform(
-            [[num_vals[col] for col in NUM_COLS]]
-        ).astype(np.float32)
+    x_num_raw    = np.array([[num_vals[col] for col in NUM_COLS]], dtype=np.float32)
+    x_num_scaled = scaler.transform(x_num_raw).astype(np.float32)
+    X_lgbm       = np.hstack([x_cat, x_num_raw])
+
+    def _nn_log_pred(m):
         with torch.no_grad():
-            log_pred = model(
+            return m(
                 torch.tensor(x_cat, dtype=torch.long),
-                torch.tensor(x_num, dtype=torch.float32),
+                torch.tensor(x_num_scaled, dtype=torch.float32),
             ).item()
+
+    def _lgbm_log_pred(m):
+        return float(m.predict(X_lgbm)[0])
+
+    if model_type == 'ensemble':
+        log_pred = (_nn_log_pred(model['nn']) + _lgbm_log_pred(model['lgbm'])) / 2
+    elif model_type == 'lgbm':
+        log_pred = _lgbm_log_pred(model)
+    else:
+        log_pred = _nn_log_pred(model)
 
     return float(np.expm1(log_pred))
 
@@ -215,11 +231,13 @@ if __name__ == '__main__':
         },
     ]
 
-    print(f'{"Ship From":<35} {"Mode":>8}  {"Ship To":>8}  {"Item":<35} {"Qty":>5}  {"Predicted Cost":>15}')
-    print('-' * 115)
+    print(f'{"Ship From":<35} {"Mode":>8}  {"Ship To":>8}  {"Item":<35} {"Qty":>5}  {"NN":>10}  {"LightGBM":>10}  {"Ensemble":>10}')
+    print('-' * 130)
     for r in examples:
-        cost = predict_cost(**r)
+        cost_nn  = predict_cost(**r, model_type='nn')
+        cost_lgb = predict_cost(**r, model_type='lgbm')
+        cost_ens = predict_cost(**r, model_type='ensemble')
         print(
             f'{r["ship_from_location_name"]:<35} {r["carrier_mode"]:>8}  {r["ship_to_zip"]:>8}  '
-            f'{r["item_id"]:<35} {r["qty"]:>5}  ${cost:>14.2f}'
+            f'{r["item_id"]:<35} {r["qty"]:>5}  ${cost_nn:>9.2f}  ${cost_lgb:>9.2f}  ${cost_ens:>9.2f}'
         )

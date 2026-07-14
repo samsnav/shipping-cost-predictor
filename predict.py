@@ -13,6 +13,7 @@ Usage (import):
 """
 
 import os
+import datetime
 import numpy as np
 import torch
 import lightgbm as lgb
@@ -85,6 +86,7 @@ def predict_cost(
     qty: int | float,
     carrier_mode: str = 'PARCEL',
     carrier_name: str = 'UPS',
+    ship_date=None,
     model_type: str = 'ensemble',
 ) -> float:
     """
@@ -107,6 +109,13 @@ def predict_cost(
     -------
     float : predicted cost in dollars
     """
+    if ship_date is None:
+        _date = datetime.date.today()
+    elif isinstance(ship_date, str):
+        _date = datetime.date.fromisoformat(ship_date)
+    else:
+        _date = ship_date
+
     artifacts_dir = _artifacts_dir_for_mode(carrier_mode)
     arts     = _load(artifacts_dir, model_type)
     lookups  = arts['lookups']
@@ -161,6 +170,7 @@ def predict_cost(
         'Item_Class1':             item_class1,
         'Item_Class2':             item_class2,
         'NFMC_code':               nfmc_code,
+        'ship_month':              str(_date.month),
     }
     num_vals = {
         'log_qty':        np.log1p(qty),
@@ -169,6 +179,7 @@ def predict_cost(
         'log_density':    np.log1p(density),
         'log_miles':      np.log1p(estimated_miles),
         'is_residential': float(is_residential),
+        'ship_year':      float(_date.year),
     }
 
     x_cat = np.array(
@@ -225,9 +236,9 @@ if __name__ == '__main__':
         },
         {
             'ship_from_location_name': 'Keystone Technologies New KC',
-            'ship_to_zip': '90210',
+            'ship_to_zip': '11788',
             'item_id': 'KT-HBLED90-1.5F-850-VDIM-P /G2',
-            'qty': 50,
+            'qty': 8,
             'carrier_mode': 'LTL',
         },
         {

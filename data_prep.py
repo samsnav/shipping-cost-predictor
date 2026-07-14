@@ -21,9 +21,9 @@ PARCEL_ARTIFACTS_DIR  = os.path.join(_BASE, 'artifacts', 'parcel')
 FREIGHT_ARTIFACTS_DIR = os.path.join(_BASE, 'artifacts', 'freight')
 
 # Categorical features fed to embedding layers
-CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'Carrier Name', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code']
+CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'Carrier Name', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code', 'ship_month']
 # Log-transformed numeric features
-NUM_COLS = ['log_qty', 'log_cbft', 'log_weight', 'log_density', 'log_miles', 'is_residential']
+NUM_COLS = ['log_qty', 'log_cbft', 'log_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year']
 TARGET_COL = 'log_cost'
 
 
@@ -61,6 +61,9 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
     df['ship_from_location_name'] = df['ship_from_location_name'].astype(str)
     df['Carrier Mode'] = df['Carrier Mode'].fillna('Unknown').astype(str).str.strip()
     df['Carrier Name'] = df['Carrier Name'].fillna('Unknown').astype(str).str.strip()
+
+    if 'ship_date' in df.columns:
+        df['ship_date'] = pd.to_datetime(df['ship_date'], errors='coerce')
 
     if carrier_modes is not None:
         df = df[df['Carrier Mode'].isin(carrier_modes)]
@@ -200,6 +203,18 @@ def enrich_features(df, lookups):
     df['log_miles'] = np.log1p(df['estimated_miles'])
     if 'Fixed Total Cost' in df.columns:
         df['log_cost'] = np.log1p(df['Fixed Total Cost'])
+
+    # Ship date features — month captures peak-season surcharges, year captures rate increases
+    if 'ship_date' in df.columns:
+        median_month = int(df['ship_date'].dt.month.median())
+        median_year  = float(df['ship_date'].dt.year.median())
+        df['ship_month'] = df['ship_date'].dt.month.fillna(median_month).astype(int).astype(str)
+        df['ship_year']  = df['ship_date'].dt.year.fillna(median_year).astype(float)
+    else:
+        import datetime
+        now = datetime.datetime.now()
+        df['ship_month'] = str(now.month)
+        df['ship_year']  = float(now.year)
 
     return df
 

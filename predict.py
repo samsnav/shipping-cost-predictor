@@ -1,6 +1,8 @@
 """
 Predict shipping cost from the four user-supplied inputs.
 
+Automatically routes to the PARCEL or Freight (LTL/FTL) model based on carrier_mode.
+
 Usage (script):
     python predict.py
 
@@ -16,25 +18,38 @@ import torch
 import lightgbm as lgb
 
 from data_prep import (
-    load_artifacts, classify_residential, ARTIFACTS_DIR, CAT_COLS, NUM_COLS
+    load_artifacts, classify_residential,
+    PARCEL_ARTIFACTS_DIR, FREIGHT_ARTIFACTS_DIR,
+    CAT_COLS, NUM_COLS,
 )
 from model import ShippingCostNN
 
 DEVICE = 'cpu'
+FREIGHT_MODES = {'LTL', 'FTL'}
+
+# Cache keyed by artifacts_dir to support both models in the same process
 _cache: dict = {}
 
 
-def _load(model_type: str = 'nn'):
-    if 'lookups' not in _cache:
-        lookups, encoders, scaler, model_config = load_artifacts()
-        _cache.update({'lookups': lookups, 'encoders': encoders,
-                       'scaler': scaler, 'model_config': model_config})
+def _artifacts_dir_for_mode(carrier_mode: str) -> str:
+    if str(carrier_mode).upper().strip() in FREIGHT_MODES:
+        return FREIGHT_ARTIFACTS_DIR
+    return PARCEL_ARTIFACTS_DIR
+
+
+def _load(artifacts_dir: str, model_type: str = 'nn') -> dict:
+    slot = _cache.setdefault(artifacts_dir, {})
+
+    if 'lookups' not in slot:
+        lookups, encoders, scaler, model_config = load_artifacts(artifacts_dir)
+        slot.update({'lookups': lookups, 'encoders': encoders,
+                     'scaler': scaler, 'model_config': model_config})
 
     need_nn   = model_type in ('nn', 'ensemble')
     need_lgbm = model_type in ('lgbm', 'ensemble')
 
-    if need_nn and 'model_nn' not in _cache:
-        cfg = _cache['model_config']
+    if need_nn and 'model_nn' not in slot:
+        cfg = slot['model_config']
         m = ShippingCostNN(
             embedding_sizes=cfg['embedding_sizes'],
             n_numeric=cfg['n_numeric'],
@@ -42,17 +57,17 @@ def _load(model_type: str = 'nn'):
             dropout=cfg.get('dropout', 0.3),
         )
         m.load_state_dict(
-            torch.load(os.path.join(ARTIFACTS_DIR, 'best_model.pt'), map_location=DEVICE)
+            torch.load(os.path.join(artifacts_dir, 'best_model.pt'), map_location=DEVICE)
         )
         m.eval()
-        _cache['model_nn'] = m
+        slot['model_nn'] = m
 
-    if need_lgbm and 'model_lgbm' not in _cache:
-        _cache['model_lgbm'] = lgb.Booster(
-            model_file=os.path.join(ARTIFACTS_DIR, 'lgbm_model.txt')
+    if need_lgbm and 'model_lgbm' not in slot:
+        slot['model_lgbm'] = lgb.Booster(
+            model_file=os.path.join(artifacts_dir, 'lgbm_model.txt')
         )
 
-    return _cache
+    return slot
 
 
 def _encode_val(encoders, col, val):
@@ -70,10 +85,13 @@ def predict_cost(
     qty: int | float,
     carrier_mode: str = 'PARCEL',
     carrier_name: str = 'UPS',
-    model_type: str = 'nn',
+    model_type: str = 'ensemble',
 ) -> float:
     """
     Predict the shipping cost for a single shipment.
+
+    Automatically selects the PARCEL model for carrier_mode='PARCEL' and the
+    Freight model for LTL/FTL modes.
 
     Parameters
     ----------
@@ -81,15 +99,16 @@ def predict_cost(
     ship_to_zip             : destination zip code, e.g. '10001'
     item_id                 : SKU / item identifier
     qty                     : number of units
-    carrier_mode            : e.g. 'PARCEL', 'LTL', 'VOLUME'  (default: 'PARCEL')
-    carrier_name            : e.g. 'UPS', 'FEDEX', 'ESTES'    (default: 'UPS')
-    model_type              : 'nn', 'lgbm', or 'ensemble'      (default: 'nn')
+    carrier_mode            : 'PARCEL', 'LTL', or 'FTL'  (default: 'PARCEL')
+    carrier_name            : e.g. 'UPS', 'FEDEX', 'ESTES'  (default: 'UPS')
+    model_type              : 'nn', 'lgbm', or 'ensemble'    (default: 'ensemble')
 
     Returns
     -------
     float : predicted cost in dollars
     """
-    arts     = _load(model_type)
+    artifacts_dir = _artifacts_dir_for_mode(carrier_mode)
+    arts     = _load(artifacts_dir, model_type)
     lookups  = arts['lookups']
     encoders = arts['encoders']
     scaler   = arts['scaler']
@@ -118,7 +137,7 @@ def predict_cost(
     estimated_weight = max(qty * weight_per_unit, 0.0)
 
     # ── Estimate distance from zip-prefix pair ────────────────────────────────
-    loc_str  = str(ship_from_location_name)
+    loc_str   = str(ship_from_location_name)
     from_zip3 = str(location_zip3.get(loc_str, '194'))[:3]
     to_zip3   = str(ship_to_zip).strip()[:3]
 
@@ -130,7 +149,6 @@ def predict_cost(
     # ── Build feature row ─────────────────────────────────────────────────────
     density = estimated_weight / estimated_cbft if estimated_cbft > 0 else 0.0
 
-    # Residential flag — automatic from ship_to_zip, not a user input
     res_lookup = lookups.get('residential_lookup', {})
     is_residential = res_lookup.get(str(ship_to_zip).strip(), classify_residential(ship_to_zip))
 
@@ -188,7 +206,8 @@ def predict_batch(records: list) -> list:
     Predict costs for multiple shipments.
 
     Each record is a dict with keys:
-        ship_from_location_name, ship_to_zip, item_id, qty, carrier_mode (optional)
+        ship_from_location_name, ship_to_zip, item_id, qty,
+        carrier_mode (optional), carrier_name (optional), model_type (optional)
 
     Returns list of predicted costs (dollars), in the same order.
     """

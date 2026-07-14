@@ -15,7 +15,10 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 EXCEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'raw_shipping_data.xlsx')
-ARTIFACTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'artifacts')
+_BASE = os.path.dirname(os.path.abspath(__file__))
+ARTIFACTS_DIR         = os.path.join(_BASE, 'artifacts')
+PARCEL_ARTIFACTS_DIR  = os.path.join(_BASE, 'artifacts', 'parcel')
+FREIGHT_ARTIFACTS_DIR = os.path.join(_BASE, 'artifacts', 'freight')
 
 # Categorical features fed to embedding layers
 CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'Carrier Name', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code']
@@ -24,7 +27,7 @@ NUM_COLS = ['log_qty', 'log_cbft', 'log_weight', 'log_density', 'log_miles', 'is
 TARGET_COL = 'log_cost'
 
 
-def load_and_clean(excel_path=EXCEL_PATH):
+def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
     print(f'Reading {excel_path} ...')
     # Copy to a temp file first so this works even when Excel has the file open
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
@@ -58,6 +61,10 @@ def load_and_clean(excel_path=EXCEL_PATH):
     df['ship_from_location_name'] = df['ship_from_location_name'].astype(str)
     df['Carrier Mode'] = df['Carrier Mode'].fillna('Unknown').astype(str).str.strip()
     df['Carrier Name'] = df['Carrier Name'].fillna('Unknown').astype(str).str.strip()
+
+    if carrier_modes is not None:
+        df = df[df['Carrier Mode'].isin(carrier_modes)]
+        print(f'  Filtered to {carrier_modes}: {len(df):,} rows')
 
     return df
 
@@ -228,20 +235,20 @@ def apply_encoders(df, encoders, scaler):
     return X_cat, X_num, y
 
 
-def save_artifacts(lookups, encoders, scaler, model_config):
-    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    with open(os.path.join(ARTIFACTS_DIR, 'lookups.pkl'), 'wb') as f:
+def save_artifacts(lookups, encoders, scaler, model_config, artifacts_dir=ARTIFACTS_DIR):
+    os.makedirs(artifacts_dir, exist_ok=True)
+    with open(os.path.join(artifacts_dir, 'lookups.pkl'), 'wb') as f:
         pickle.dump(lookups, f)
-    with open(os.path.join(ARTIFACTS_DIR, 'encoders.pkl'), 'wb') as f:
+    with open(os.path.join(artifacts_dir, 'encoders.pkl'), 'wb') as f:
         pickle.dump(encoders, f)
-    with open(os.path.join(ARTIFACTS_DIR, 'scaler.pkl'), 'wb') as f:
+    with open(os.path.join(artifacts_dir, 'scaler.pkl'), 'wb') as f:
         pickle.dump(scaler, f)
-    with open(os.path.join(ARTIFACTS_DIR, 'model_config.pkl'), 'wb') as f:
+    with open(os.path.join(artifacts_dir, 'model_config.pkl'), 'wb') as f:
         pickle.dump(model_config, f)
 
 
-def load_artifacts():
+def load_artifacts(artifacts_dir=ARTIFACTS_DIR):
     def _load(name):
-        with open(os.path.join(ARTIFACTS_DIR, name), 'rb') as f:
+        with open(os.path.join(artifacts_dir, name), 'rb') as f:
             return pickle.load(f)
     return _load('lookups.pkl'), _load('encoders.pkl'), _load('scaler.pkl'), _load('model_config.pkl')

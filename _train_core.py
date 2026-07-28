@@ -6,7 +6,6 @@ Called by train_parcel.py and train_freight.py — not run directly.
 import os
 import numpy as np
 import torch
-import torch.nn as nn
 import lightgbm as lgb
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
@@ -29,8 +28,16 @@ VAL_SPLIT    = 0.1
 RANDOM_STATE = 42
 DEVICE       = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+# Error analysis showed both models systematically underpredict expensive
+# shipments (Huber/quantile-0.5 optimize for the median, not for avoiding
+# underprediction). These bias the loss toward penalizing underprediction
+# more than overprediction so the tail gets pulled up.
+UNDERPRED_PENALTY  = 2.0   # NN: loss multiplier when pred < target
+LGBM_QUANTILE_ALPHA = 0.65  # LightGBM: >0.5 shifts predictions upward
+
 LGBM_PARAMS = {
-    'objective':         'huber',
+    'objective':         'quantile',
+    'alpha':             LGBM_QUANTILE_ALPHA,
     'metric':            'mae',
     'learning_rate':     0.05,
     'num_leaves':        127,
@@ -42,6 +49,19 @@ LGBM_PARAMS = {
     'n_jobs':            -1,
     'seed':              RANDOM_STATE,
 }
+
+
+def asymmetric_huber_loss(pred, target, delta=1.0, under_penalty=UNDERPRED_PENALTY):
+    """Huber loss weighted to penalize underprediction (pred < target) more."""
+    diff = target - pred
+    abs_diff = diff.abs()
+    huber = torch.where(
+        abs_diff <= delta,
+        0.5 * diff ** 2,
+        delta * (abs_diff - 0.5 * delta),
+    )
+    weight = torch.where(diff > 0, under_penalty, 1.0)
+    return (huber * weight).mean()
 
 
 def run_training(carrier_modes: list, artifacts_dir: str, label: str):
@@ -89,7 +109,7 @@ def run_training(carrier_modes: list, artifacts_dir: str, label: str):
 
     optimizer  = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=4, factor=0.5)
-    criterion  = nn.HuberLoss()
+    criterion  = asymmetric_huber_loss
     best_loss  = float('inf')
 
     print(f'{"Epoch":>5}  {"Train":>8}  {"Val":>8}  {"MAE":>9}  {"R²":>7}')

@@ -21,10 +21,41 @@ PARCEL_ARTIFACTS_DIR  = os.path.join(_BASE, 'artifacts', 'parcel')
 FREIGHT_ARTIFACTS_DIR = os.path.join(_BASE, 'artifacts', 'freight')
 
 # Categorical features fed to embedding layers
-CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'Carrier Name', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code', 'ship_month']
+CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'speed_tier', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code', 'ship_month']
 # Log-transformed numeric features
-NUM_COLS = ['log_qty', 'log_cbft', 'log_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year']
+NUM_COLS = ['log_qty', 'log_cbft', 'log_billable_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year']
 TARGET_COL = 'log_cost'
+
+# Dimensional weight divisor: dim_weight (lbs) = cubic feet / DIM_DIVISOR
+DIM_DIVISOR = 225
+
+# Speed-tier keyword rules, checked in order (most specific first). First match wins;
+# unmatched carrier names default to 'Ground' (plain LTL/FTL carriers have no speed distinction).
+_UNKNOWN_CARRIER_PATTERNS = ('pick-up', 'pickup', 'drop off', 'dropoff', 'will call',
+                             'not specified', 'unspecified', 'placeholder', 'do not use')
+_SPEED_TIER_RULES = (
+    ('International', ('intl', 'international', 'dhl')),
+    ('Next Day',      ('next day', 'overnight')),
+    ('2 Day',         ('2day', 'second day', '2 day')),
+    ('3 Day',         ('three day', '3 day', 'express saver')),
+    ('Economy',       ('economy',)),
+    ('Expedited',     ('priority', 'expedited', 'expedite', 'courier', 'distribution by air')),
+)
+
+
+def classify_speed_tier(carrier_name: str) -> str:
+    """Map a raw Carrier Name string to a low-cardinality speed tier."""
+    if pd.isna(carrier_name):
+        return 'Unknown'
+    s = str(carrier_name).strip().lower()
+    if not s:
+        return 'Unknown'
+    if any(p in s for p in _UNKNOWN_CARRIER_PATTERNS):
+        return 'Unknown'
+    for tier, keywords in _SPEED_TIER_RULES:
+        if any(k in s for k in keywords):
+            return tier
+    return 'Ground'
 
 
 def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
@@ -60,6 +91,7 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
     df['item_id'] = df['item_id'].astype(str)
     df['ship_from_location_name'] = df['ship_from_location_name'].astype(str)
     df['Carrier Mode'] = df['Carrier Mode'].fillna('Unknown').astype(str).str.strip()
+    df['speed_tier'] = df['Carrier Name'].apply(classify_speed_tier)
     df['Carrier Name'] = df['Carrier Name'].fillna('Unknown').astype(str).str.strip()
 
     if 'ship_date' in df.columns:
@@ -188,8 +220,14 @@ def enrich_features(df, lookups):
             fallback = item_lookup[col].to_dict()
             df[col] = df[col].fillna(df['item_id'].map(fallback)).fillna('Unknown')
 
-    # Density = lbs per cubic foot — signals whether carrier bills on weight or DIM
-    df['density'] = (df['estimated_weight'] / df['estimated_cbft'].replace(0, np.nan)).fillna(0).clip(lower=0)
+    # Dimensional weight — carrier bills on cubic feet / DIM_DIVISOR when that exceeds actual weight
+    df['dim_weight'] = df['estimated_cbft'] / DIM_DIVISOR
+
+    # Billable weight — carriers charge on whichever is greater, actual or dimensional
+    df['billable_weight'] = np.maximum(df['dim_weight'], df['estimated_weight'])
+
+    # Density = billable lbs per cubic foot — signals whether carrier bills on weight or DIM
+    df['density'] = (df['billable_weight'] / df['estimated_cbft'].replace(0, np.nan)).fillna(0).clip(lower=0)
 
     # Residential delivery flag — looked up from ship_to_zip, no user input needed
     res_lookup = lookups['residential_lookup']
@@ -198,7 +236,7 @@ def enrich_features(df, lookups):
     # Log-transform inputs and target
     df['log_qty'] = np.log1p(df['PT Total Quantity'])
     df['log_cbft'] = np.log1p(df['estimated_cbft'])
-    df['log_weight'] = np.log1p(df['estimated_weight'])
+    df['log_billable_weight'] = np.log1p(df['billable_weight'])
     df['log_density'] = np.log1p(df['density'])
     df['log_miles'] = np.log1p(df['estimated_miles'])
     if 'Fixed Total Cost' in df.columns:

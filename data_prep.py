@@ -14,7 +14,9 @@ import zipcodes as zc
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-EXCEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'raw_shipping_data.xlsx')
+EXCEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'raw_shipping_info.xlsx')
+FREIGHT_SHEET   = 'OutboundFreightSpend'
+ITEM_DIMS_SHEET = 'Item Unit Dims and Cartons'
 _BASE = os.path.dirname(os.path.abspath(__file__))
 ARTIFACTS_DIR         = os.path.join(_BASE, 'artifacts')
 PARCEL_ARTIFACTS_DIR  = os.path.join(_BASE, 'artifacts', 'parcel')
@@ -23,8 +25,11 @@ FREIGHT_ARTIFACTS_DIR = os.path.join(_BASE, 'artifacts', 'freight')
 # Categorical features fed to embedding layers
 CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'speed_tier', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code', 'ship_month']
 # Log-transformed numeric features
-NUM_COLS = ['log_qty', 'log_cbft', 'log_billable_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year']
+NUM_COLS = ['log_qty', 'log_cbft', 'log_billable_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year', 'log_n_line_items']
 TARGET_COL = 'log_cost'
+
+# Groups shipment line items into one physical shipment (pick ticket / transfer)
+TICKET_KEY = 'PT or TR no'
 
 # Dimensional weight divisor: dim_weight (lbs) = cubic feet / DIM_DIVISOR
 DIM_DIVISOR = 225
@@ -64,21 +69,19 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
     tmp.close()
     shutil.copy2(excel_path, tmp.name)
-    df = pd.read_excel(tmp.name)
+    df = pd.read_excel(tmp.name, sheet_name=FREIGHT_SHEET)
     os.unlink(tmp.name)
     df.columns = [c.strip('[]') for c in df.columns]
 
     required = ['Fixed Total Cost', 'ship_from_location_name', 'ship_to_zip',
                 'item_id', 'PT Total Quantity']
     df = df.dropna(subset=required)
-    df = df[df['Fixed Total Cost'] > 0]
-    df = df[df['Fixed Total Cost'] <= 1000]
     df = df[df['PT Total Quantity'] > 0]
 
     allowed_locations = {
-        'Keystone Technologies PA',
-        'Keystone Technologies PHX',
-        'Keystone Technologies New KC',
+        'KT PA',
+        'KT PHX',
+        'KT New KC',
     }
     df = df[df['ship_from_location_name'].isin(allowed_locations)]
     df = df[df['pt_type'] == 'PT']
@@ -87,7 +90,7 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
     df['ship_from_zip'] = df['ship_from_zip'].astype(str).str.strip()
     df['to_zip3'] = df['ship_to_zip'].str[:3]
     df['from_zip3'] = df['ship_from_zip'].str[:3]
-    df['NFMC_code'] = df['NFMC code'].astype(str)
+    df['NFMC_code'] = df['NMFC'].astype(str)
     df['item_id'] = df['item_id'].astype(str)
     df['ship_from_location_name'] = df['ship_from_location_name'].astype(str)
     df['Carrier Mode'] = df['Carrier Mode'].fillna('Unknown').astype(str).str.strip()
@@ -102,6 +105,24 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
         print(f'  Filtered to {carrier_modes}: {len(df):,} rows')
 
     return df
+
+
+def load_item_dims(excel_path=EXCEL_PATH):
+    """
+    Per-item unit dimensions/NMFC from the item master tab. Used as a fallback in
+    build_lookup_tables for items whose shipment history doesn't yield a usable
+    cbft-per-unit or NMFC code (sparse shipment history, all-null fields, etc.).
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
+    tmp.close()
+    shutil.copy2(excel_path, tmp.name)
+    df = pd.read_excel(tmp.name, sheet_name=ITEM_DIMS_SHEET)
+    os.unlink(tmp.name)
+
+    df['item_id'] = df['item_id'].astype(str)
+    df['unit_cbft'] = (df['unit_length'] * df['unit_width'] * df['unit_height']) / 1728
+    df['nmfc_code'] = df['nmfc_code'].astype(str)
+    return df.set_index('item_id')[['unit_cbft', 'nmfc_code']]
 
 
 def classify_residential(zip_code: str) -> float:
@@ -122,20 +143,21 @@ def build_residential_lookup(zip_codes):
     return {z: classify_residential(z) for z in zip_codes}
 
 
-def build_lookup_tables(df):
+def build_lookup_tables(df, excel_path=EXCEL_PATH):
     """
     Build lookup tables from training data. These are saved to disk and
     used at inference time to enrich the 4 user-provided inputs.
     """
     df = df.copy()
 
-    # Per-unit cubic footage and weight (used to estimate totals from qty at inference)
+    # Per-unit cubic footage (used to estimate totals from qty at inference)
     df['cbft_per_unit'] = df['PT Total Cb Ft'] / df['PT Total Quantity']
     df['cbft_per_unit'] = df['cbft_per_unit'].replace([np.inf, -np.inf], np.nan)
     global_cbft_median = df['cbft_per_unit'].median()
 
-    df['weight_per_unit'] = df['PT Total Weight'] / df['PT Total Quantity']
-    df['weight_per_unit'] = df['weight_per_unit'].replace([np.inf, -np.inf], np.nan)
+    # Per-unit weight — unit_weight is the item master's fixed per-unit weight,
+    # more reliable than PT Total Weight / Qty (which flips sign on returns/credits)
+    df['weight_per_unit'] = df['unit_weight']
     global_weight_median = df['weight_per_unit'].median()
 
     item_lookup = df.groupby('item_id').agg(
@@ -145,6 +167,18 @@ def build_lookup_tables(df):
         Item_Class2=('Item_Class2', lambda x: x.mode().iloc[0]),
         NFMC_code=('NFMC_code', lambda x: x.mode().iloc[0]),
     )
+
+    # Fall back to the item master tab for items with no usable cbft/NMFC from
+    # shipment history, before falling back further to the global median
+    item_dims = load_item_dims(excel_path)
+    item_lookup['avg_cbft_per_unit'] = item_lookup['avg_cbft_per_unit'].fillna(
+        item_dims['unit_cbft'].reindex(item_lookup.index)
+    )
+    item_lookup['NFMC_code'] = item_lookup['NFMC_code'].where(
+        item_lookup['NFMC_code'].notna() & (item_lookup['NFMC_code'] != 'nan'),
+        item_dims['nmfc_code'].reindex(item_lookup.index),
+    )
+
     item_lookup['avg_cbft_per_unit'] = item_lookup['avg_cbft_per_unit'].fillna(global_cbft_median)
     item_lookup['avg_weight_per_unit'] = item_lookup['avg_weight_per_unit'].fillna(global_weight_median)
 
@@ -171,6 +205,54 @@ def build_lookup_tables(df):
         'residential_lookup': residential_lookup,
     }
     return lookups, df
+
+
+def aggregate_to_tickets(df):
+    """
+    Collapse per-line-item rows into one row per physical shipment (grouped by TICKET_KEY).
+
+    A ticket's Fixed Total Cost is the SUM of its lines — verified against the raw data
+    that a line's cost is a weight-proportional allocation of its ticket's real total, so
+    summing reconstructs the actual shipment cost rather than training on partial slices
+    of it. Categorical item/class/NMFC fields come from whichever line contributes the
+    most weight, matching the heuristic predict._enrich uses to combine a caller-supplied
+    multi-item list at inference time — so training and inference build features the same
+    way. Tickets with a non-positive total cost (returns/credits/waived shipments) are
+    dropped here, replacing the old per-line cost filter (which could silently drop some
+    lines of a multi-line ticket while keeping others, understating its true total).
+    """
+    df = df.copy()
+    df['_line_weight'] = df['PT Total Weight'].fillna(0)
+
+    dominant_idx = df.groupby(TICKET_KEY)['_line_weight'].idxmax()
+    dominant = df.loc[
+        dominant_idx, [TICKET_KEY, 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code']
+    ].set_index(TICKET_KEY)
+
+    g = df.groupby(TICKET_KEY)
+    agg_map = {
+        'ship_from_location_name': 'first',
+        'ship_to_zip':             'first',
+        'ship_from_zip':           'first',
+        'to_zip3':                 'first',
+        'from_zip3':               'first',
+        'Carrier Mode':            'first',
+        'Carrier Name':            'first',
+        'speed_tier':              'first',
+        'PT Actual Miles':         'median',
+        'PT Total Quantity':       'sum',
+        'PT Total Weight':         'sum',
+        'PT Total Cb Ft':          'sum',
+        'Fixed Total Cost':        'sum',
+    }
+    if 'ship_date' in df.columns:
+        agg_map['ship_date'] = 'first'
+
+    tickets = g.agg(agg_map)
+    tickets['n_line_items'] = g.size()
+    tickets = tickets.join(dominant)
+    tickets = tickets[tickets['Fixed Total Cost'] > 0]
+    return tickets.reset_index()
 
 
 def enrich_features(df, lookups):
@@ -226,6 +308,26 @@ def enrich_features(df, lookups):
     # Billable weight — carriers charge on whichever is greater, actual or dimensional
     df['billable_weight'] = np.maximum(df['dim_weight'], df['estimated_weight'])
 
+    # Weight percentiles for this mode's training set — used at inference to flag
+    # shipments outside the mode's typical range (see predict._mode_recommendation).
+    # Computed separately for single- vs multi-line-item tickets: a heavy multi-item
+    # ticket is usually many ordinary packages summed (cheap, legitimate), while a
+    # heavy SINGLE-item ticket is one genuinely oversized shipment — blending the two
+    # populations badly miscalibrates the threshold for both (single-item real support
+    # runs out far below the blended 95th percentile; multi-item shipments get flagged
+    # well before they need to be).
+    lookups['billable_weight_p05'] = float(df['billable_weight'].quantile(0.05))
+    lookups['billable_weight_p95'] = float(df['billable_weight'].quantile(0.95))
+    if 'n_line_items' in df.columns:
+        single = df[df['n_line_items'] == 1]
+        multi  = df[df['n_line_items'] > 1]
+        if len(single) > 0:
+            lookups['billable_weight_p05_single'] = float(single['billable_weight'].quantile(0.05))
+            lookups['billable_weight_p95_single'] = float(single['billable_weight'].quantile(0.95))
+        if len(multi) > 0:
+            lookups['billable_weight_p05_multi'] = float(multi['billable_weight'].quantile(0.05))
+            lookups['billable_weight_p95_multi'] = float(multi['billable_weight'].quantile(0.95))
+
     # Density = billable lbs per cubic foot — signals whether carrier bills on weight or DIM
     df['density'] = (df['billable_weight'] / df['estimated_cbft'].replace(0, np.nan)).fillna(0).clip(lower=0)
 
@@ -239,6 +341,7 @@ def enrich_features(df, lookups):
     df['log_billable_weight'] = np.log1p(df['billable_weight'])
     df['log_density'] = np.log1p(df['density'])
     df['log_miles'] = np.log1p(df['estimated_miles'])
+    df['log_n_line_items'] = np.log1p(df['n_line_items']) if 'n_line_items' in df.columns else np.log1p(1)
     if 'Fixed Total Cost' in df.columns:
         df['log_cost'] = np.log1p(df['Fixed Total Cost'])
 

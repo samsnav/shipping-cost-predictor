@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
 
 from data_prep import (
-    load_and_clean, build_lookup_tables, enrich_features, apply_encoders,
+    load_and_clean, build_lookup_tables, aggregate_to_tickets, enrich_features, apply_encoders,
     load_artifacts, EXCEL_PATH, PARCEL_ARTIFACTS_DIR, FREIGHT_ARTIFACTS_DIR,
     NUM_COLS,
 )
@@ -63,7 +63,8 @@ def analyze(label, carrier_modes, artifacts_dir):
     print(f'\n{"="*70}\n  {label}\n{"="*70}')
 
     df = load_and_clean(EXCEL_PATH, carrier_modes=carrier_modes)
-    lookups, df = build_lookup_tables(df)
+    lookups, df_lines = build_lookup_tables(df)
+    df = aggregate_to_tickets(df_lines)
     df = enrich_features(df, lookups)
     df = df.dropna(subset=['log_cost']).reset_index(drop=True)
 

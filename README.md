@@ -81,12 +81,23 @@ item contributes the most weight.
 
 Or run `python predict.py` directly for a few worked examples.
 
+### Web UI
+
+```
+streamlit run app.py
+```
+
+Opens a form in the browser: pick a ship-from location, enter a destination zip, add one or
+more line items (searchable item dropdown + quantity), and get cost per mode/speed tier back,
+including the "Use LTL"/"Use PARCEL" steer when applicable.
+
 ## Project layout
 
 | File | Purpose |
 |---|---|
 | `data_prep.py` | Load/clean the raw Excel export, collapse line items into physical shipments, engineer features (billable weight, distance, residential flag, speed tier), fit encoders, save/load artifacts |
 | `model.py` | `ShippingCostNN` — entity-embedding + MLP architecture shared by both mode-specific models |
+| `app.py` | Streamlit web UI over `predict_options_multi` |
 | `_train_core.py` | Shared training loop (NN + LightGBM) — not run directly |
 | `train_parcel.py` / `train_freight.py` | Entry points that call `_train_core.run_training` for PARCEL vs. LTL/FTL, writing to separate `artifacts/` subdirectories |
 | `predict.py` | Loads trained artifacts and serves predictions across all mode/speed-tier combinations |

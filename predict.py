@@ -35,7 +35,7 @@ FREIGHT_MODES = {'LTL', 'FTL'}
 # (see data_prep.classify_speed_tier — LTL Economy/Expedited have <100 rows each, too
 # thin to trust, so LTL is Ground-only here).
 MODE_SPEED_TIERS = {
-    'PARCEL': ['Ground', '2 Day', 'Next Day', '3 Day'],
+    'PARCEL': ['Ground', 'Next Day', '2 Day', '3 Day'],
     'LTL':    ['Ground'],
 }
 

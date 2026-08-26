@@ -6,9 +6,10 @@ Usage:
 """
 
 import datetime
+import os
 import streamlit as st
 
-from data_prep import load_item_dims
+from data_prep import ARTIFACTS_DIR
 from predict import predict_options_multi
 
 SHIP_FROM_LOCATIONS = ['KT PA', 'KT PHX', 'KT New KC']
@@ -300,8 +301,18 @@ st.markdown(CSS, unsafe_allow_html=True)
 def known_items():
     """All item_ids in the item master (Item Unit Dims and Cartons tab), for a searchable
     dropdown instead of free text. Items without shipment history still price fine —
-    predict.py falls back to global median weight/cbft for them."""
-    return sorted(load_item_dims().index)
+    predict.py falls back to global median weight/cbft for them.
+
+    Reads a precomputed list (artifacts/item_ids.txt) rather than the raw Excel export
+    directly — the raw data isn't shipped to deployment, only trained/derived artifacts
+    are. Regenerate the file locally after a data refresh with:
+        python -c "from data_prep import load_item_dims, ARTIFACTS_DIR; import os; \
+            open(os.path.join(ARTIFACTS_DIR, 'item_ids.txt'), 'w', encoding='utf-8') \
+            .write('\\n'.join(sorted(load_item_dims().index)))"
+    """
+    path = os.path.join(ARTIFACTS_DIR, 'item_ids.txt')
+    with open(path, encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip()]
 
 
 def render_results(result: dict, recommendation: dict):

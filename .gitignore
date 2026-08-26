@@ -3,8 +3,9 @@
 *.xls
 *.csv
 
-# Trained model artifacts — reproduced by running train.py
-artifacts/
+# Trained model artifacts — artifacts/parcel and artifacts/freight are committed so
+# the deployed app has models to load; local backup snapshots stay out of the repo.
+artifacts/_backup_*/
 
 # Python
 __pycache__/

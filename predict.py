@@ -239,9 +239,9 @@ def _mode_recommendation(billable_weight_by_mode: dict, lookups_by_mode: dict, n
     """
     Flag shipments that fall outside the typical weight range for their mode, using
     each mode's own historical billable-weight distribution (computed in
-    data_prep.enrich_features during training). A PARCEL shipment heavier than 95%
+    data_prep.enrich_features during training). A PARCEL shipment heavier than 90%
     of historical PARCEL shipments is usually cheaper via LTL; an LTL shipment
-    lighter than 95% of historical LTL shipments (i.e. below the 5th percentile)
+    lighter than 90% of historical LTL shipments (i.e. below the 10th percentile)
     is usually cheaper via PARCEL.
 
     Thresholds are chosen by line-item count (n_items): a heavy multi-item shipment is
@@ -256,21 +256,21 @@ def _mode_recommendation(billable_weight_by_mode: dict, lookups_by_mode: dict, n
     ltl_weight    = billable_weight_by_mode.get('LTL')
     parcel_lookups = lookups_by_mode.get('PARCEL', {})
     ltl_lookups    = lookups_by_mode.get('LTL', {})
-    parcel_p95     = parcel_lookups.get(f'billable_weight_p95_{seg}', parcel_lookups.get('billable_weight_p95'))
-    ltl_p05        = ltl_lookups.get(f'billable_weight_p05_{seg}', ltl_lookups.get('billable_weight_p05'))
+    parcel_p90     = parcel_lookups.get(f'billable_weight_p90_{seg}', parcel_lookups.get('billable_weight_p90'))
+    ltl_p10        = ltl_lookups.get(f'billable_weight_p10_{seg}', ltl_lookups.get('billable_weight_p10'))
 
-    if parcel_weight is not None and parcel_p95 is not None and parcel_weight > parcel_p95:
+    if parcel_weight is not None and parcel_p90 is not None and parcel_weight > parcel_p90:
         return {
             'flag': 'consider_ltl',
-            'message': (f'Estimated billable weight ({parcel_weight:.0f} lb) exceeds the 95th '
-                        f'percentile of historical {seg}-item PARCEL shipments ({parcel_p95:.0f} lb) — '
+            'message': (f'Estimated billable weight ({parcel_weight:.0f} lb) exceeds the 90th '
+                        f'percentile of historical {seg}-item PARCEL shipments ({parcel_p90:.0f} lb) — '
                         f'LTL is likely more cost-effective.'),
         }
-    if ltl_weight is not None and ltl_p05 is not None and ltl_weight < ltl_p05:
+    if ltl_weight is not None and ltl_p10 is not None and ltl_weight < ltl_p10:
         return {
             'flag': 'consider_parcel',
-            'message': (f'Estimated billable weight ({ltl_weight:.0f} lb) is below the 5th '
-                        f'percentile of historical {seg}-item LTL shipments ({ltl_p05:.0f} lb) — '
+            'message': (f'Estimated billable weight ({ltl_weight:.0f} lb) is below the 10th '
+                        f'percentile of historical {seg}-item LTL shipments ({ltl_p10:.0f} lb) — '
                         f'PARCEL is likely more cost-effective.'),
         }
     return {'flag': None, 'message': None}

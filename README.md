@@ -50,14 +50,14 @@ options = predict_options('KT PA', '10001', 'KT-LED17PLL-22GC-840-D /G2', 100)
 ```
 
 `recommendation` flags shipments that fall outside the typical weight range for the mode
-they'd naturally ship in — a PARCEL-sized shipment heavier than 95% of historical PARCEL
-shipments gets `flag: 'consider_ltl'`; an LTL shipment lighter than 95% of historical LTL
-shipments (below the 5th percentile) gets `flag: 'consider_parcel'`. `flag` is `None` when
+they'd naturally ship in — a PARCEL-sized shipment heavier than 90% of historical PARCEL
+shipments gets `flag: 'consider_ltl'`; an LTL shipment lighter than 90% of historical LTL
+shipments (below the 10th percentile) gets `flag: 'consider_parcel'`. `flag` is `None` when
 the shipment is typical for both modes. When a mode's prices are withheld this way, that
 mode's key holds a plain string steer instead of a tier dict, e.g. `{'PARCEL': 'Use LTL',
 'LTL': {'Ground': 563.69}, 'recommendation': {'flag': 'consider_ltl', 'message': '...'}}`.
 
-The 95th/5th-percentile thresholds are computed separately for single- vs. multi-item
+The 90th/10th-percentile thresholds are computed separately for single- vs. multi-item
 shipments, not from one blended population — a heavy multi-item shipment is usually many
 ordinary packages summed (cheap, legitimate), while a heavy single-item shipment is one
 genuinely oversized package with far less historical precedent. Blending them badly
@@ -131,8 +131,8 @@ including the "Use LTL"/"Use PARCEL" steer when applicable.
 - **Training** (`_train_core.py`): each mode gets its own NN (via PyTorch, entity embeddings
   for categoricals + log-scaled numerics) and LightGBM model, trained on an 90/10 split with
   early stopping. MAE/R² are reported for NN, LightGBM, and their ensemble average. Each mode's
-  5th/95th-percentile billable weight is saved alongside its lookups for the mode recommendation
-  — once from all tickets (`billable_weight_p05`/`p95`, used as a fallback) and once each from
+  10th/90th-percentile billable weight is saved alongside its lookups for the mode recommendation
+  — once from all tickets (`billable_weight_p10`/`p90`, used as a fallback) and once each from
   single-line-item tickets only and multi-line-item tickets only (`..._single`/`..._multi`).
 - **Inference** (`predict.py`): re-derives the same features from the user's inputs using saved
   lookup tables, then evaluates both models per mode/speed-tier and averages their log-cost

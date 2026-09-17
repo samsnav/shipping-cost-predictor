@@ -346,19 +346,19 @@ def enrich_features(df, lookups):
     # ticket is usually many ordinary packages summed (cheap, legitimate), while a
     # heavy SINGLE-item ticket is one genuinely oversized shipment — blending the two
     # populations badly miscalibrates the threshold for both (single-item real support
-    # runs out far below the blended 95th percentile; multi-item shipments get flagged
+    # runs out far below the blended 90th percentile; multi-item shipments get flagged
     # well before they need to be).
-    lookups['billable_weight_p05'] = float(df['billable_weight'].quantile(0.05))
-    lookups['billable_weight_p95'] = float(df['billable_weight'].quantile(0.95))
+    lookups['billable_weight_p10'] = float(df['billable_weight'].quantile(0.10))
+    lookups['billable_weight_p90'] = float(df['billable_weight'].quantile(0.90))
     if 'n_line_items' in df.columns:
         single = df[df['n_line_items'] == 1]
         multi  = df[df['n_line_items'] > 1]
         if len(single) > 0:
-            lookups['billable_weight_p05_single'] = float(single['billable_weight'].quantile(0.05))
-            lookups['billable_weight_p95_single'] = float(single['billable_weight'].quantile(0.95))
+            lookups['billable_weight_p10_single'] = float(single['billable_weight'].quantile(0.10))
+            lookups['billable_weight_p90_single'] = float(single['billable_weight'].quantile(0.90))
         if len(multi) > 0:
-            lookups['billable_weight_p05_multi'] = float(multi['billable_weight'].quantile(0.05))
-            lookups['billable_weight_p95_multi'] = float(multi['billable_weight'].quantile(0.95))
+            lookups['billable_weight_p10_multi'] = float(multi['billable_weight'].quantile(0.10))
+            lookups['billable_weight_p90_multi'] = float(multi['billable_weight'].quantile(0.90))
 
     # Density = billable lbs per cubic foot — signals whether carrier bills on weight or DIM
     df['density'] = (df['billable_weight'] / df['estimated_cbft'].replace(0, np.nan)).fillna(0).clip(lower=0)

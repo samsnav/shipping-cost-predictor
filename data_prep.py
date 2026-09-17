@@ -25,7 +25,7 @@ FREIGHT_ARTIFACTS_DIR = os.path.join(_BASE, 'artifacts', 'freight')
 # Categorical features fed to embedding layers
 CAT_COLS = ['ship_from_location_name', 'Carrier Mode', 'speed_tier', 'to_zip3', 'item_id', 'Item_Class1', 'Item_Class2', 'NFMC_code', 'ship_month']
 # Log-transformed numeric features
-NUM_COLS = ['log_qty', 'log_cbft', 'log_billable_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year', 'log_n_line_items']
+NUM_COLS = ['log_qty', 'log_cbft', 'log_billable_weight', 'log_density', 'log_miles', 'is_residential', 'ship_year', 'log_n_line_items', 'log_length_plus_girth']
 TARGET_COL = 'log_cost'
 
 # Groups shipment line items into one physical shipment (pick ticket / transfer)
@@ -109,9 +109,14 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
 
 def load_item_dims(excel_path=EXCEL_PATH):
     """
-    Per-item unit dimensions/NMFC from the item master tab. Used as a fallback in
-    build_lookup_tables for items whose shipment history doesn't yield a usable
-    cbft-per-unit or NMFC code (sparse shipment history, all-null fields, etc.).
+    Per-item unit dimensions/NMFC from the item master tab. The primary source for
+    per-unit cubic footage in build_lookup_tables (falls back to shipment-derived cbft
+    for items missing from this sheet or without recorded dimensions), and for
+    length_plus_girth, a shape signal independent of volume — carriers apply
+    "Additional Handling"/"Large Package" surcharges based on a package's longest side
+    plus girth (2x the sum of its other two sides) crossing a threshold, not its total
+    volume, so a long thin item and a compact cube of the same cbft are billed very
+    differently in ways pure volume can't distinguish.
     """
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
     tmp.close()
@@ -122,7 +127,16 @@ def load_item_dims(excel_path=EXCEL_PATH):
     df['item_id'] = df['item_id'].astype(str)
     df['unit_cbft'] = (df['unit_length'] * df['unit_width'] * df['unit_height']) / 1728
     df['nmfc_code'] = df['nmfc_code'].astype(str)
-    return df.set_index('item_id')[['unit_cbft', 'nmfc_code']]
+
+    dim_cols = ['unit_length', 'unit_width', 'unit_height']
+    has_all_dims = df[dim_cols].notna().all(axis=1)
+    sorted_dims = np.sort(df.loc[has_all_dims, dim_cols].values, axis=1)[:, ::-1]
+    df['length_plus_girth'] = np.nan
+    df.loc[has_all_dims, 'length_plus_girth'] = (
+        sorted_dims[:, 0] + 2 * (sorted_dims[:, 1] + sorted_dims[:, 2])
+    )
+
+    return df.set_index('item_id')[['unit_cbft', 'nmfc_code', 'length_plus_girth']]
 
 
 def classify_residential(zip_code: str) -> float:
@@ -186,6 +200,13 @@ def build_lookup_tables(df, excel_path=EXCEL_PATH):
     item_lookup['avg_cbft_per_unit'] = item_lookup['avg_cbft_per_unit'].fillna(global_cbft_median)
     item_lookup['avg_weight_per_unit'] = item_lookup['avg_weight_per_unit'].fillna(global_weight_median)
 
+    # Length + girth (longest side + 2x the sum of the other two) — a per-item shape
+    # signal independent of quantity, unlike weight/cbft which scale with qty. Only
+    # available from the item master; items without recorded dims get the global median.
+    item_lookup['avg_length_plus_girth'] = item_dims['length_plus_girth'].reindex(item_lookup.index)
+    global_girth_median = item_lookup['avg_length_plus_girth'].median()
+    item_lookup['avg_length_plus_girth'] = item_lookup['avg_length_plus_girth'].fillna(global_girth_median)
+
     # Ship-from location name → 3-digit zip prefix
     location_zip3 = df.groupby('ship_from_location_name')['from_zip3'].agg(
         lambda x: x.mode().iloc[0]
@@ -206,6 +227,7 @@ def build_lookup_tables(df, excel_path=EXCEL_PATH):
         'default_miles': default_miles,
         'global_cbft_median': float(global_cbft_median),
         'global_weight_median': float(global_weight_median),
+        'global_girth_median': float(global_girth_median),
         'residential_lookup': residential_lookup,
     }
     return lookups, df
@@ -286,6 +308,12 @@ def enrich_features(df, lookups):
     else:
         df['estimated_weight'] = weight_estimate.clip(lower=0)
 
+    # Length + girth — a per-package shape signal, not scaled by quantity (unlike
+    # weight/cbft): a shipment of 100 units doesn't have 100x the girth, since a large
+    # or oddly-shaped item's own dimensions are what trigger an oversize surcharge.
+    girth_map = item_lookup['avg_length_plus_girth'].to_dict()
+    df['length_plus_girth'] = df['item_id'].map(girth_map).fillna(lookups['global_girth_median'])
+
     # Miles
     if 'PT Actual Miles' in df.columns:
         zip_miles_df = zip_miles.reset_index()
@@ -345,6 +373,7 @@ def enrich_features(df, lookups):
     df['log_billable_weight'] = np.log1p(df['billable_weight'])
     df['log_density'] = np.log1p(df['density'])
     df['log_miles'] = np.log1p(df['estimated_miles'])
+    df['log_length_plus_girth'] = np.log1p(df['length_plus_girth'])
     df['log_n_line_items'] = np.log1p(df['n_line_items']) if 'n_line_items' in df.columns else np.log1p(1)
     if 'Fixed Total Cost' in df.columns:
         df['log_cost'] = np.log1p(df['Fixed Total Cost'])

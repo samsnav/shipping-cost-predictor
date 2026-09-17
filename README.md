@@ -122,7 +122,12 @@ including the "Use LTL"/"Use PARCEL" steer when applicable.
   fixed `unit_weight` directly. Billable weight takes the greater of actual weight and dimensional
   weight (cubic feet / 225). Distance is estimated from a (origin zip3, destination zip3) →
   median-miles lookup. Speed tier is derived from keyword matching on the raw carrier name (Next
-  Day, 2 Day, 3 Day, Economy, Expedited, International, else Ground).
+  Day, 2 Day, 3 Day, Economy, Expedited, International, else Ground). `length_plus_girth` (longest
+  side + 2x the sum of the other two, the same basis carriers use for "Additional Handling"/"Large
+  Package" surcharges) is fed as its own feature, independent of quantity — unlike weight/cbft,
+  a shipment of 100 units doesn't have 100x the girth, since it's the item's own shape that
+  triggers an oversize surcharge, not how many of it are shipped. Comes from the dominant
+  (highest-weight) line item's dimensions for multi-item shipments.
 - **Training** (`_train_core.py`): each mode gets its own NN (via PyTorch, entity embeddings
   for categoricals + log-scaled numerics) and LightGBM model, trained on an 90/10 split with
   early stopping. MAE/R² are reported for NN, LightGBM, and their ensemble average. Each mode's

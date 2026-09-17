@@ -91,13 +91,14 @@ def _encode_val(encoders, col, val):
 
 
 def _lookup_item(item_lookup, lookups, item_id):
-    """Per-unit cbft/weight and class info for one item_id, falling back to global medians."""
+    """Per-unit cbft/weight/girth and class info for one item_id, falling back to global medians."""
     item_id_str = str(item_id)
     if item_id_str in item_lookup.index:
         row = item_lookup.loc[item_id_str]
         return {
             'cbft_per_unit':   float(row['avg_cbft_per_unit']),
             'weight_per_unit': float(row['avg_weight_per_unit']),
+            'length_plus_girth': float(row['avg_length_plus_girth']),
             'item_class1':     str(row['Item_Class1']),
             'item_class2':     str(row['Item_Class2']),
             'nfmc_code':       str(row['NFMC_code']),
@@ -105,6 +106,7 @@ def _lookup_item(item_lookup, lookups, item_id):
     return {
         'cbft_per_unit':   lookups['global_cbft_median'],
         'weight_per_unit': lookups['global_weight_median'],
+        'length_plus_girth': lookups['global_girth_median'],
         'item_class1':     '__unknown__',
         'item_class2':     '__unknown__',
         'nfmc_code':       '__unknown__',
@@ -139,7 +141,7 @@ def _enrich(artifacts_dir, ship_from_location_name, ship_to_zip, items, ship_dat
     total_qty = 0.0
     total_cbft = 0.0
     total_weight = 0.0
-    dominant = None  # (weight_contribution, item_id, class1, class2, nfmc_code)
+    dominant = None  # (weight_contribution, item_id, class1, class2, nfmc_code, length_plus_girth)
     for item_id, qty in items:
         info = _lookup_item(item_lookup, lookups, item_id)
         item_cbft   = max(qty * info['cbft_per_unit'], 0.0)
@@ -148,9 +150,12 @@ def _enrich(artifacts_dir, ship_from_location_name, ship_to_zip, items, ship_dat
         total_cbft   += item_cbft
         total_weight += item_weight
         if dominant is None or item_weight > dominant[0]:
-            dominant = (item_weight, str(item_id), info['item_class1'], info['item_class2'], info['nfmc_code'])
+            dominant = (
+                item_weight, str(item_id), info['item_class1'], info['item_class2'],
+                info['nfmc_code'], info['length_plus_girth'],
+            )
 
-    _, item_id_str, item_class1, item_class2, nfmc_code = dominant
+    _, item_id_str, item_class1, item_class2, nfmc_code, length_plus_girth = dominant
     estimated_cbft   = total_cbft
     estimated_weight = total_weight
 
@@ -192,6 +197,7 @@ def _enrich(artifacts_dir, ship_from_location_name, ship_to_zip, items, ship_dat
         'is_residential':      float(is_residential),
         'ship_year':           float(_date.year),
         'log_n_line_items':    np.log1p(len(items)),
+        'log_length_plus_girth': np.log1p(length_plus_girth),
     }
     return arts, cat_vals, num_vals
 

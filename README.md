@@ -114,10 +114,12 @@ including the "Use LTL"/"Use PARCEL" steer when applicable.
   `predict._enrich` uses to combine a caller-supplied multi-item list at inference time, so
   training and inference build features the same way. `n_line_items` (how many distinct lines
   made up the ticket) is fed to the model as a feature.
-- **Feature engineering** (`data_prep.py`): cubic footage is estimated per-unit from historical
-  `PT Total Cb Ft` / quantity (falling back to the item master's unit dimensions, then a global
-  median, when a given item has no usable shipment history). Weight uses the item master's fixed
-  `unit_weight` directly. Billable weight takes the greater of actual weight and dimensional
+- **Feature engineering** (`data_prep.py`): cubic footage per unit comes from the item master's
+  (`Item Unit Dims and Cartons`) curated unit dimensions first — that's authoritative, unlike
+  shipment-derived cbft which is noisy (packaging variance, multi-box splits). Falls back to the
+  historical `PT Total Cb Ft` / quantity median for items missing from that sheet or without
+  recorded dimensions, then a global median as the last resort. Weight uses the item master's
+  fixed `unit_weight` directly. Billable weight takes the greater of actual weight and dimensional
   weight (cubic feet / 225). Distance is estimated from a (origin zip3, destination zip3) →
   median-miles lookup. Speed tier is derived from keyword matching on the raw carrier name (Next
   Day, 2 Day, 3 Day, Economy, Expedited, International, else Ground).

@@ -168,11 +168,15 @@ def build_lookup_tables(df, excel_path=EXCEL_PATH):
         NFMC_code=('NFMC_code', lambda x: x.mode().iloc[0]),
     )
 
-    # Fall back to the item master tab for items with no usable cbft/NMFC from
-    # shipment history, before falling back further to the global median
+    # Item master (ITEM_DIMS_SHEET) is the authoritative source for cubic footage —
+    # unit dimensions there are curated master data, unlike shipment-derived cbft which
+    # is noisy (packaging variance, multi-box splits). Always prefer it when the item
+    # has a usable entry there; fall back to the shipment-derived median for items
+    # missing from that sheet or with no recorded dimensions, then the global median.
     item_dims = load_item_dims(excel_path)
-    item_lookup['avg_cbft_per_unit'] = item_lookup['avg_cbft_per_unit'].fillna(
-        item_dims['unit_cbft'].reindex(item_lookup.index)
+    shipment_derived_cbft = item_lookup['avg_cbft_per_unit']
+    item_lookup['avg_cbft_per_unit'] = (
+        item_dims['unit_cbft'].reindex(item_lookup.index).fillna(shipment_derived_cbft)
     )
     item_lookup['NFMC_code'] = item_lookup['NFMC_code'].where(
         item_lookup['NFMC_code'].notna() & (item_lookup['NFMC_code'] != 'nan'),

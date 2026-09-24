@@ -85,6 +85,15 @@ def load_and_clean(excel_path=EXCEL_PATH, carrier_modes=None):
     }
     df = df[df['ship_from_location_name'].isin(allowed_locations)]
     df = df[df['pt_type'] == 'PT']
+    # The export repeats some lines once per extra charge. Collapse to one row per pick
+    # ticket line, summing cost across the repeats (they carry real charges) but counting
+    # quantity/weight/cbft once — summing those too made multi-charge tickets look far
+    # bigger than they were
+    line_key = [TICKET_KEY, 'pick_ticket_line_no']
+    cost_cols = ['Fixed Total Cost', 'Fuel Cost', 'Linehaul Cost', 'Accessorial Total Cost']
+    agg = {c: 'first' for c in df.columns if c not in line_key}
+    agg.update({c: 'sum' for c in cost_cols})
+    df = df.groupby(line_key, as_index=False, sort=False, dropna=False).agg(agg)
 
     df['ship_to_zip'] = df['ship_to_zip'].astype(str).str.strip()
     df['ship_from_zip'] = df['ship_from_zip'].astype(str).str.strip()
@@ -125,7 +134,9 @@ def load_item_dims(excel_path=EXCEL_PATH):
     os.unlink(tmp.name)
 
     df['item_id'] = df['item_id'].astype(str)
-    df['unit_cbft'] = (df['unit_length'] * df['unit_width'] * df['unit_height']) / 1728
+    # The unit_* dims are actually per-carton (unit_cbft / recorded shipment cbft-per-unit
+    # tracks carton_qty at r=0.99), so divide back down to a true per-unit volume
+    df['unit_cbft'] = (df['unit_length'] * df['unit_width'] * df['unit_height']) / 1728 / df['carton_qty']
     df['nmfc_code'] = df['nmfc_code'].astype(str)
 
     dim_cols = ['unit_length', 'unit_width', 'unit_height']
@@ -200,6 +211,12 @@ def build_lookup_tables(df, excel_path=EXCEL_PATH):
     item_lookup['avg_cbft_per_unit'] = item_lookup['avg_cbft_per_unit'].fillna(global_cbft_median)
     item_lookup['avg_weight_per_unit'] = item_lookup['avg_weight_per_unit'].fillna(global_weight_median)
 
+    # Train on the same qty x lookup cbft that inference computes (predict._enrich), not
+    # the recorded PT Total Cb Ft — item-master unit dims run ~6-18x larger than recorded
+    # shipment cbft, so mixing the two made every prediction look like a far bulkier
+    # shipment than anything seen in training and inflated predicted cost ~1.5-1.8x.
+    df['line_cbft_estimate'] = df['PT Total Quantity'] * df['item_id'].map(item_lookup['avg_cbft_per_unit'])
+
     # Length + girth (longest side + 2x the sum of the other two) — a per-item shape
     # signal independent of quantity, unlike weight/cbft which scale with qty. Only
     # available from the item master; items without recorded dims get the global median.
@@ -270,6 +287,7 @@ def aggregate_to_tickets(df):
         'PT Total Weight':         'sum',
         'PT Total Cb Ft':          'sum',
         'Fixed Total Cost':        'sum',
+        'line_cbft_estimate':      'sum',
     }
     if 'ship_date' in df.columns:
         agg_map['ship_date'] = 'first'
@@ -292,12 +310,13 @@ def enrich_features(df, lookups):
 
     # Use actual values when available (training); fall back to lookup estimates at inference
 
-    # Cubic footage — actual value preferred, lookup estimate fills any nulls
-    cbft_map = item_lookup['avg_cbft_per_unit'].to_dict()
-    cbft_estimate = (df['PT Total Quantity'] * df['item_id'].map(cbft_map).fillna(lookups['global_cbft_median']))
-    if 'PT Total Cb Ft' in df.columns:
-        df['estimated_cbft'] = df['PT Total Cb Ft'].fillna(cbft_estimate).clip(lower=0)
+    # Cubic footage — per-line qty x lookup cbft summed per ticket (see build_lookup_tables),
+    # matching how predict._enrich builds it; recorded PT Total Cb Ft is deliberately unused
+    if 'line_cbft_estimate' in df.columns:
+        df['estimated_cbft'] = df['line_cbft_estimate'].clip(lower=0)
     else:
+        cbft_map = item_lookup['avg_cbft_per_unit'].to_dict()
+        cbft_estimate = df['PT Total Quantity'] * df['item_id'].map(cbft_map).fillna(lookups['global_cbft_median'])
         df['estimated_cbft'] = cbft_estimate.clip(lower=0)
 
     # Weight — actual value preferred, lookup estimate fills any nulls

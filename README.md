@@ -52,7 +52,9 @@ options = predict_options('KT PA', '10001', 'KT-LED17PLL-22GC-840-D /G2', 100)
 `recommendation` flags shipments that fall outside the typical weight range for the mode
 they'd naturally ship in — a PARCEL-sized shipment heavier than 90% of historical PARCEL
 shipments gets `flag: 'consider_ltl'`; an LTL shipment lighter than 90% of historical LTL
-shipments (below the 10th percentile) gets `flag: 'consider_parcel'`. `flag` is `None` when
+shipments (below the 10th percentile) gets `flag: 'consider_parcel'`, as does any shipment
+under 3 cubic feet (`PARCEL_CBFT_CUTOFF`) — unless it's heavy enough for the `consider_ltl`
+rule, which is checked first so weight wins. `flag` is `None` when
 the shipment is typical for both modes. When a mode's prices are withheld this way, that
 mode's key holds a plain string steer instead of a tier dict, e.g. `{'PARCEL': 'Use LTL',
 'LTL': {'Ground': 563.69}, 'recommendation': {'flag': 'consider_ltl', 'message': '...'}}`.
@@ -122,7 +124,7 @@ including the "Use LTL"/"Use PARCEL" steer when applicable.
   `PT Total Cb Ft`, because inference can only ever compute the estimate — training on recorded
   cbft while predicting from item-master cbft previously inflated predictions ~1.6x. Weight uses the item master's
   fixed `unit_weight` directly. Billable weight takes the greater of actual weight and dimensional
-  weight (cubic feet / 225). Distance is estimated from a (origin zip3, destination zip3) →
+  weight (cubic inches / 139, the carrier standard). Distance is estimated from a (origin zip3, destination zip3) →
   median-miles lookup. Speed tier is derived from keyword matching on the raw carrier name (Next
   Day, 2 Day, 3 Day, Economy, Expedited, International, else Ground). `length_plus_girth` (longest
   side + 2x the sum of the other two, the same basis carriers use for "Additional Handling"/"Large

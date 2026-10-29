@@ -31,8 +31,9 @@ TARGET_COL = 'log_cost'
 # Groups shipment line items into one physical shipment (pick ticket / transfer)
 TICKET_KEY = 'PT or TR no'
 
-# Dimensional weight divisor: dim_weight (lbs) = cubic feet / DIM_DIVISOR
-DIM_DIVISOR = 225
+# Carrier dimensional weight: dim_weight (lbs) = cubic inches / DIM_DIVISOR
+DIM_DIVISOR = 139
+CUBIC_INCHES_PER_CBFT = 1728
 
 # Speed-tier keyword rules, checked in order (most specific first). First match wins;
 # unmatched carrier names default to 'Ground' (plain LTL/FTL carriers have no speed distinction).
@@ -353,8 +354,8 @@ def enrich_features(df, lookups):
             fallback = item_lookup[col].to_dict()
             df[col] = df[col].fillna(df['item_id'].map(fallback)).fillna('Unknown')
 
-    # Dimensional weight — carrier bills on cubic feet / DIM_DIVISOR when that exceeds actual weight
-    df['dim_weight'] = df['estimated_cbft'] / DIM_DIVISOR
+    # Dimensional weight — carrier bills on cubic inches / DIM_DIVISOR when that exceeds actual weight
+    df['dim_weight'] = df['estimated_cbft'] * CUBIC_INCHES_PER_CBFT / DIM_DIVISOR
 
     # Billable weight — carriers charge on whichever is greater, actual or dimensional
     df['billable_weight'] = np.maximum(df['dim_weight'], df['estimated_weight'])

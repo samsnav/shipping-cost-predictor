@@ -24,7 +24,7 @@ import lightgbm as lgb
 from data_prep import (
     load_artifacts, classify_residential,
     PARCEL_ARTIFACTS_DIR, FREIGHT_ARTIFACTS_DIR,
-    CAT_COLS, NUM_COLS, DIM_DIVISOR,
+    CAT_COLS, NUM_COLS, DIM_DIVISOR, CUBIC_INCHES_PER_CBFT,
 )
 from model import ShippingCostNN
 
@@ -38,6 +38,11 @@ MODE_SPEED_TIERS = {
     'PARCEL': ['Ground', 'Next Day', '2 Day', '3 Day'],
     'LTL':    ['Ground'],
 }
+
+# Shipments under this many cubic feet go PARCEL unless their weight says LTL. Below it
+# only ~3% of historical tickets shipped LTL (median 27 lb), and LTL's ~$160 floor makes
+# it 6-16x the median PARCEL cost at that size.
+PARCEL_CBFT_CUTOFF = 3.0
 
 # Cache keyed by artifacts_dir to support both models in the same process
 _cache: dict = {}
@@ -160,7 +165,7 @@ def _enrich(artifacts_dir, ship_from_location_name, ship_to_zip, items, ship_dat
     estimated_weight = total_weight
 
     # Billable weight — carriers charge on whichever is greater, actual or dimensional
-    dim_weight       = estimated_cbft / DIM_DIVISOR
+    dim_weight       = estimated_cbft * CUBIC_INCHES_PER_CBFT / DIM_DIVISOR
     billable_weight  = max(dim_weight, estimated_weight)
 
     # ── Estimate distance from zip-prefix pair ────────────────────────────────
@@ -235,14 +240,16 @@ def _forward(arts, cat_vals, num_vals, model_type):
     return float(np.expm1(log_pred))
 
 
-def _mode_recommendation(billable_weight_by_mode: dict, lookups_by_mode: dict, n_items: int) -> dict:
+def _mode_recommendation(billable_weight_by_mode: dict, lookups_by_mode: dict, n_items: int,
+                         cbft: float | None = None) -> dict:
     """
     Flag shipments that fall outside the typical weight range for their mode, using
     each mode's own historical billable-weight distribution (computed in
     data_prep.enrich_features during training). A PARCEL shipment heavier than 90%
     of historical PARCEL shipments is usually cheaper via LTL; an LTL shipment
     lighter than 90% of historical LTL shipments (i.e. below the 10th percentile)
-    is usually cheaper via PARCEL.
+    is usually cheaper via PARCEL. A shipment under PARCEL_CBFT_CUTOFF cubic feet is
+    also sent to PARCEL — checked after the heavy-for-PARCEL rule, so weight wins.
 
     Thresholds are chosen by line-item count (n_items): a heavy multi-item shipment is
     usually many ordinary packages summed (cheap, legitimate), while a heavy SINGLE-item
@@ -265,6 +272,12 @@ def _mode_recommendation(billable_weight_by_mode: dict, lookups_by_mode: dict, n
             'message': (f'Estimated billable weight ({parcel_weight:.0f} lb) exceeds the 90th '
                         f'percentile of historical {seg}-item PARCEL shipments ({parcel_p90:.0f} lb) — '
                         f'LTL is likely more cost-effective.'),
+        }
+    if cbft is not None and cbft < PARCEL_CBFT_CUTOFF:
+        return {
+            'flag': 'consider_parcel',
+            'message': (f'Estimated size ({cbft:.1f} cu ft) is under {PARCEL_CBFT_CUTOFF:g} cu ft — '
+                        f'PARCEL is likely more cost-effective.'),
         }
     if ltl_weight is not None and ltl_p10 is not None and ltl_weight < ltl_p10:
         return {
@@ -348,6 +361,7 @@ def predict_options_multi(
 
     results = {}
     billable_weight_by_mode = {}
+    cbft_by_mode = {}
     lookups_by_mode = {}
     for mode, tiers in MODE_SPEED_TIERS.items():
         artifacts_dir = _artifacts_dir_for_mode(mode)
@@ -355,13 +369,16 @@ def predict_options_multi(
             artifacts_dir, ship_from_location_name, ship_to_zip, items, ship_date, model_type
         )
         billable_weight_by_mode[mode] = float(np.expm1(num_vals['log_billable_weight']))
+        cbft_by_mode[mode] = float(np.expm1(num_vals['log_cbft']))
         lookups_by_mode[mode] = arts['lookups']
         results[mode] = {}
         for tier in tiers:
             row = dict(cat_vals, **{'Carrier Mode': mode, 'speed_tier': tier})
             results[mode][tier] = _forward(arts, row, num_vals, model_type)
 
-    recommendation = _mode_recommendation(billable_weight_by_mode, lookups_by_mode, len(items))
+    recommendation = _mode_recommendation(
+        billable_weight_by_mode, lookups_by_mode, len(items), cbft=cbft_by_mode.get('PARCEL')
+    )
     if recommendation['flag'] == 'consider_ltl':
         results['PARCEL'] = 'Use LTL'
     elif recommendation['flag'] == 'consider_parcel':
